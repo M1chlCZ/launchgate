@@ -1,0 +1,23 @@
+services:
+  gate:
+    build: .
+    environment:
+      LAUNCH_ORIGIN: http://localhost:8090
+      LAUNCH_FRONTEND: http://demo:80
+      LAUNCH_BACKEND: http://demo:80
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - launch-state:/data/launch
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+  demo:
+    image: nginx:alpine
+
+volumes:
+  launch-state:
