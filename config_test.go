@@ -5,6 +5,7 @@ import (
 )
 
 func TestSplitList(t *testing.T) {
+	t.Parallel()
 	got := splitList(" a, b ,,c ")
 	want := []string{"a", "b", "c"}
 	if len(got) != len(want) {
@@ -42,18 +43,26 @@ func TestLoadConfigReadsValues(t *testing.T) {
 	t.Setenv("LAUNCH_PAGE_DIR", "/tmp/page")
 	cfg := loadConfig()
 	if cfg.Origin != "https://example.test" || cfg.StateDir != "/tmp/launch" || cfg.TrustedProxy != "192.0.2.1/32" ||
-		len(cfg.BypassRoutes) != 2 || cfg.BypassRoutes[0] != "/api/webhooks" || cfg.BypassRoutes[1] != "/api/callbacks" ||
+		len(
+			cfg.BypassRoutes,
+		) != 2 || cfg.BypassRoutes[0] != "/api/webhooks" || cfg.BypassRoutes[1] != "/api/callbacks" ||
 		cfg.PageDir != "/tmp/page" {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 }
 
 func TestNewGatewayValidation(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := initializeStore(dir); err != nil {
 		t.Fatal(err)
 	}
-	base := config{Origin: "https://example.test", Frontend: "http://127.0.0.1:1", Backend: "http://127.0.0.1:1", StateDir: dir}
+	base := config{
+		Origin:   "https://example.test",
+		Frontend: "http://127.0.0.1:1",
+		Backend:  "http://127.0.0.1:1",
+		StateDir: dir,
+	}
 	if _, err := newGateway(base); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}

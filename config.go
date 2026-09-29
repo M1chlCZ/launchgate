@@ -29,7 +29,7 @@ func loadConfig() config {
 
 func splitList(raw string) []string {
 	items := []string{}
-	for _, item := range strings.Split(raw, ",") {
+	for item := range strings.SplitSeq(raw, ",") {
 		if item = strings.TrimSpace(item); item != "" {
 			items = append(items, item)
 		}

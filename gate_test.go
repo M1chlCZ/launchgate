@@ -29,7 +29,7 @@ func fixture(t *testing.T) (http.Handler, string, *atomic.Int32) {
 			t.Error("invitation cookie leaked upstream")
 		}
 		w.Header().Set("Cache-Control", "public, max-age=31536000")
-		w.Header().Set("Cloudflare-CDN-Cache-Control", "public,max-age=31536000")
+		w.Header().Set("Cloudflare-Cdn-Cache-Control", "public,max-age=31536000")
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = io.WriteString(w, r.URL.RequestURI()+"|"+r.Header.Get("X-Real-IP")+"|"+r.Header.Get("X-Forwarded-Proto"))
 	}))
@@ -81,6 +81,7 @@ func unlock(t *testing.T, g http.Handler, token string) *http.Cookie {
 }
 
 func TestAnonymousCannotReachApplication(t *testing.T) {
+	t.Parallel()
 	g, _, hits := fixture(t)
 	for _, p := range []string{"/", "/en", "/products/test", "/admin", "/api/v1/catalog", "/media/private.png", "/_next/static/app.js", "/_next/image?url=%2Fmedia%2Fprivate.png&w=640&q=75", "/sitemap.xml"} {
 		w := request(g, "GET", p, "", nil)
@@ -103,11 +104,17 @@ func TestAnonymousCannotReachApplication(t *testing.T) {
 }
 
 func TestCrawlerPolicyFollowsStoreMode(t *testing.T) {
+	t.Parallel()
 	g, dir, hits := fixture(t)
 	previewRobots := request(g, "GET", "/robots.txt", "", nil)
 	if previewRobots.Code != 200 || previewRobots.Body.String() != "User-agent: *\nDisallow: /\n" ||
 		!strings.Contains(previewRobots.Header().Get("X-Robots-Tag"), "noindex") {
-		t.Fatalf("preview robots = %d %q %q", previewRobots.Code, previewRobots.Body.String(), previewRobots.Header().Get("X-Robots-Tag"))
+		t.Fatalf(
+			"preview robots = %d %q %q",
+			previewRobots.Code,
+			previewRobots.Body.String(),
+			previewRobots.Header().Get("X-Robots-Tag"),
+		)
 	}
 	if !strings.Contains(request(g, "GET", "/products/test", "", nil).Header().Get("X-Robots-Tag"), "noindex") {
 		t.Fatal("preview catalog page is indexable")
@@ -146,6 +153,7 @@ func TestCrawlerPolicyFollowsStoreMode(t *testing.T) {
 }
 
 func TestInviteCookieExpiryAndImmediateRevocation(t *testing.T) {
+	t.Parallel()
 	g, dir, hits := fixture(t)
 	invite, token, err := issueInvitation(dir, "reviewer", time.Hour, time.Now())
 	if err != nil {
@@ -164,7 +172,7 @@ func TestInviteCookieExpiryAndImmediateRevocation(t *testing.T) {
 		if w.Code != 200 || !strings.HasPrefix(w.Body.String(), p+"|") {
 			t.Fatalf("proxy %s: %d %s", p, w.Code, w.Body.String())
 		}
-		if w.Header().Get("Cloudflare-CDN-Cache-Control") != "no-store" {
+		if w.Header().Get("Cloudflare-Cdn-Cache-Control") != "no-store" {
 			t.Fatal("upstream re-enabled cache")
 		}
 	}
@@ -174,8 +182,8 @@ func TestInviteCookieExpiryAndImmediateRevocation(t *testing.T) {
 	if !strings.Contains(request(g, "GET", "/api/v1/catalog", "", cookie).Body.String(), "|203.0.113.9|https") {
 		t.Fatal("trusted proxy identity not forwarded")
 	}
-	if err := revokeInvitation(dir, invite.ID); err != nil {
-		t.Fatal(err)
+	if revokeErr := revokeInvitation(dir, invite.ID); revokeErr != nil {
+		t.Fatal(revokeErr)
 	}
 	request(g, "GET", "/api/v1/catalog", "", cookie)
 	if hits.Load() != 5 {
@@ -194,6 +202,7 @@ func TestInviteCookieExpiryAndImmediateRevocation(t *testing.T) {
 }
 
 func TestOnlyExactBypassPOSTBypassesInvitation(t *testing.T) {
+	t.Parallel()
 	g, _, hits := fixture(t)
 	p := "/api/v1/webhooks/payments/provider"
 	w := request(g, "POST", p, `{"test":true}`, nil)
@@ -210,21 +219,26 @@ func TestOnlyExactBypassPOSTBypassesInvitation(t *testing.T) {
 }
 
 func TestInvalidStoreAndClosedModeFailClosed(t *testing.T) {
+	t.Parallel()
 	g, dir, hits := fixture(t)
 	_, token, err := issueInvitation(dir, "test", time.Hour, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	cookie := unlock(t, g, token)
-	if err := setMode(dir, "closed"); err != nil {
-		t.Fatal(err)
+	if modeErr := setMode(dir, "closed"); modeErr != nil {
+		t.Fatal(modeErr)
 	}
 	request(g, "GET", "/api/v1/catalog", "", cookie)
 	if hits.Load() != 0 {
 		t.Fatal("closed mode grants access")
 	}
-	if err := os.WriteFile(filepath.Join(dir, "invitations.json"), []byte(`{"mode":"public","invitations":`), 0600); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(
+		filepath.Join(dir, "invitations.json"),
+		[]byte(`{"mode":"public","invitations":`),
+		0600,
+	); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	request(g, "GET", "/api/v1/catalog", "", cookie)
 	if hits.Load() != 0 {
@@ -233,13 +247,18 @@ func TestInvalidStoreAndClosedModeFailClosed(t *testing.T) {
 }
 
 func TestOriginHostAndIdentityBoundaries(t *testing.T) {
+	t.Parallel()
 	g, dir, hits := fixture(t)
 	_, token, err := issueInvitation(dir, "test", time.Hour, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, origin := range []string{"", "https://evil.example", "null"} {
-		r := httptest.NewRequest("POST", "https://example.test"+accessPath, strings.NewReader(`{"token":"`+token+`"}`))
+		r := httptest.NewRequest(
+			http.MethodPost,
+			"https://example.test"+accessPath,
+			strings.NewReader(`{"token":"`+token+`"}`),
+		)
 		r.Header.Set("Origin", origin)
 		r.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -249,14 +268,14 @@ func TestOriginHostAndIdentityBoundaries(t *testing.T) {
 		}
 	}
 	cookie := unlock(t, g, token)
-	r := httptest.NewRequest("GET", "https://evil.example/api/v1/catalog", nil)
+	r := httptest.NewRequest(http.MethodGet, "https://evil.example/api/v1/catalog", nil)
 	r.AddCookie(cookie)
 	w := httptest.NewRecorder()
 	g.ServeHTTP(w, r)
 	if w.Code != 421 || hits.Load() != 0 {
 		t.Fatal("unknown host accepted")
 	}
-	r = httptest.NewRequest("GET", "https://example.test/api/v1/catalog", nil)
+	r = httptest.NewRequest(http.MethodGet, "https://example.test/api/v1/catalog", nil)
 	r.AddCookie(cookie)
 	r.RemoteAddr = "198.51.100.3:1234"
 	r.Header.Set("X-Real-IP", "1.2.3.4")
@@ -270,12 +289,13 @@ func TestOriginHostAndIdentityBoundaries(t *testing.T) {
 	if hits.Load() != 1 {
 		t.Fatalf("authenticated request count: %d", hits.Load())
 	}
-	if w := request(g, "GET", accessPath, "", cookie); w.Code != 403 {
+	if getResponse := request(g, "GET", accessPath, "", cookie); getResponse.Code != 403 {
 		t.Fatal("GET accepted for invitation exchange")
 	}
 }
 
 func TestStoreRejectsInvalidAndConcurrentUpdates(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := initializeStore(dir); err != nil {
 		t.Fatal(err)
@@ -305,8 +325,8 @@ func TestStoreRejectsInvalidAndConcurrentUpdates(t *testing.T) {
 	var saved struct {
 		Invitations []json.RawMessage `json:"invitations"`
 	}
-	if err := json.Unmarshal(raw, &saved); err != nil {
-		t.Fatal(err)
+	if decodeErr := json.Unmarshal(raw, &saved); decodeErr != nil {
+		t.Fatal(decodeErr)
 	}
 	if len(saved.Invitations) != 12 {
 		t.Fatalf("lost updates: %d", len(saved.Invitations))
@@ -314,6 +334,7 @@ func TestStoreRejectsInvalidAndConcurrentUpdates(t *testing.T) {
 }
 
 func TestReplacementInvitationIsExchangedBeforeEntering(t *testing.T) {
+	t.Parallel()
 	g, dir, hits := fixture(t)
 	first, token, err := issueInvitation(dir, "first", time.Hour, time.Now())
 	if err != nil {
@@ -321,7 +342,9 @@ func TestReplacementInvitationIsExchangedBeforeEntering(t *testing.T) {
 	}
 	cookie := unlock(t, g, token)
 	w := request(g, "GET", entryPath, "", cookie)
-	if w.Code != 200 || w.Header().Get("Location") != "" || !strings.Contains(w.Body.String(), "history.replaceState") || hits.Load() != 0 {
+	if w.Code != 200 || w.Header().Get("Location") != "" ||
+		!strings.Contains(w.Body.String(), "history.replaceState") ||
+		hits.Load() != 0 {
 		t.Fatal("existing cookie bypassed invitation landing")
 	}
 	_, replacement, err := issueInvitation(dir, "replacement", time.Hour, time.Now())
@@ -329,8 +352,8 @@ func TestReplacementInvitationIsExchangedBeforeEntering(t *testing.T) {
 		t.Fatal(err)
 	}
 	cookie = unlock(t, g, replacement)
-	if err := revokeInvitation(dir, first.ID); err != nil {
-		t.Fatal(err)
+	if revokeErr := revokeInvitation(dir, first.ID); revokeErr != nil {
+		t.Fatal(revokeErr)
 	}
 	request(g, "GET", "/api/v1/catalog", "", cookie)
 	if hits.Load() != 1 {

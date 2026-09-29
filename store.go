@@ -15,7 +15,15 @@ import (
 	"time"
 )
 
-const maxStoreBytes = 1 << 20
+const (
+	maxStoreBytes      = 1 << 20
+	tokenBytes         = 32
+	encodedTokenLength = 43
+	maxInvitations     = 1000
+	modeClosed         = "closed"
+	modePreview        = "preview"
+	modePublic         = "public"
+)
 
 type invitation struct {
 	ID        string    `json:"id"`
@@ -29,7 +37,9 @@ type invitationStore struct {
 	Invitations []invitation `json:"invitations"`
 }
 
-func validMode(mode string) bool { return mode == "closed" || mode == "preview" || mode == "public" }
+func validMode(mode string) bool {
+	return mode == modeClosed || mode == modePreview || mode == modePublic
+}
 
 func loadStore(dir string) (invitationStore, error) {
 	f, err := os.Open(filepath.Join(dir, "invitations.json"))
@@ -48,13 +58,14 @@ func loadStore(dir string) (invitationStore, error) {
 	if err = json.Unmarshal(data, &s); err != nil {
 		return s, errors.New("invalid invitation store")
 	}
-	if !validMode(s.Mode) || len(s.Invitations) > 1000 {
+	if !validMode(s.Mode) || len(s.Invitations) > maxInvitations {
 		return s, errors.New("invalid invitation store")
 	}
 	seen := map[string]bool{}
 	for _, i := range s.Invitations {
-		hash, err := hex.DecodeString(i.TokenHash)
-		if err != nil || len(hash) != 32 || i.ID == "" || len(i.ID) > 64 || seen[i.ID] || i.ExpiresAt.IsZero() {
+		hash, decodeErr := hex.DecodeString(i.TokenHash)
+		if decodeErr != nil || len(hash) != tokenBytes || i.ID == "" || len(i.ID) > 64 || seen[i.ID] ||
+			i.ExpiresAt.IsZero() {
 			return s, errors.New("invalid invitation record")
 		}
 		seen[i.ID] = true
@@ -74,7 +85,7 @@ func withStoreLock(dir string, fn func() error) error {
 	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		return err
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
 	return fn()
 }
 
@@ -118,7 +129,7 @@ func initializeStore(dir string) error {
 		if !os.IsNotExist(err) {
 			return errors.New("invitation store already exists or cannot be inspected")
 		}
-		return saveStore(dir, invitationStore{Mode: "closed", Invitations: []invitation{}})
+		return saveStore(dir, invitationStore{Mode: modeClosed, Invitations: []invitation{}})
 	})
 }
 
@@ -138,16 +149,22 @@ func setMode(dir, mode string) error {
 
 func issueInvitation(dir, label string, ttl time.Duration, now time.Time) (invitation, string, error) {
 	var i invitation
-	if strings.TrimSpace(label) == "" || len(label) > 120 || strings.ContainsAny(label, "\r\n\x00") || ttl <= 0 || ttl > 30*24*time.Hour {
+	if strings.TrimSpace(label) == "" || len(label) > 120 || strings.ContainsAny(label, "\r\n\x00") || ttl <= 0 ||
+		ttl > 30*24*time.Hour {
 		return i, "", errors.New("label is required; expiry must be between 1 second and 720 hours")
 	}
-	raw := make([]byte, 32)
+	raw := make([]byte, tokenBytes)
 	if _, err := rand.Read(raw); err != nil {
 		return i, "", err
 	}
 	token := base64.RawURLEncoding.EncodeToString(raw)
 	hash := sha256.Sum256([]byte(token))
-	i = invitation{ID: hex.EncodeToString(hash[:8]), Label: label, TokenHash: hex.EncodeToString(hash[:]), ExpiresAt: now.Add(ttl).UTC()}
+	i = invitation{
+		ID:        hex.EncodeToString(hash[:8]),
+		Label:     label,
+		TokenHash: hex.EncodeToString(hash[:]),
+		ExpiresAt: now.Add(ttl).UTC(),
+	}
 	err := withStoreLock(dir, func() error {
 		s, err := loadStore(dir)
 		if err != nil {
@@ -160,7 +177,7 @@ func issueInvitation(dir, label string, ttl time.Duration, now time.Time) (invit
 			}
 		}
 		s.Invitations = active
-		if len(s.Invitations) >= 1000 {
+		if len(s.Invitations) >= maxInvitations {
 			return errors.New("too many invitations")
 		}
 		s.Invitations = append(s.Invitations, i)

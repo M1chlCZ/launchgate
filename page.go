@@ -106,5 +106,6 @@ func (p *pageRenderer) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	//nolint:gosec // Page CSS and JS come from operator-controlled files and are hashed into the CSP.
 	_ = p.template.Execute(w, pageData{CSS: template.CSS(p.css), JS: template.JS(p.js)})
 }

@@ -37,8 +37,15 @@ func pageGateway(t *testing.T, pageDir string) (http.Handler, error) {
 }
 
 func TestCustomPageFiles(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
-	writePageFiles(t, dir, `<html><head><style>{{.CSS}}</style></head><body><h1>Private</h1><script>{{.JS}}</script></body></html>`, "body{color:red}", "console.log(1)")
+	writePageFiles(
+		t,
+		dir,
+		`<html><head><style>{{.CSS}}</style></head><body><h1>Private</h1><script>{{.JS}}</script></body></html>`,
+		"body{color:red}",
+		"console.log(1)",
+	)
 	gate, err := pageGateway(t, dir)
 	if err != nil {
 		t.Fatal(err)
@@ -58,6 +65,7 @@ func TestCustomPageFiles(t *testing.T) {
 }
 
 func TestCustomPageWithoutStylesOrScripts(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writePageFiles(t, dir, `<html><body><h1>Offline</h1></body></html>`, "", "")
 	gate, err := pageGateway(t, dir)
@@ -75,12 +83,14 @@ func TestCustomPageWithoutStylesOrScripts(t *testing.T) {
 }
 
 func TestCustomPageRequiresHTML(t *testing.T) {
+	t.Parallel()
 	if _, err := pageGateway(t, t.TempDir()); err == nil {
 		t.Fatal("missing page.html accepted")
 	}
 }
 
 func TestCustomPageRejectsInvalidTemplate(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writePageFiles(t, dir, `{{.Missing`, "", "")
 	if _, err := pageGateway(t, dir); err == nil {
