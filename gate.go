@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -45,6 +46,7 @@ type gateway struct {
 	trustedSet        bool
 	frontend, backend *httputil.ReverseProxy
 	page              *pageRenderer
+	webhook           *webhookNotifier
 }
 
 func newGateway(cfg config) (http.Handler, error) {
@@ -79,6 +81,9 @@ func newGateway(cfg config) (http.Handler, error) {
 	}
 	if _, err = loadStore(cfg.StateDir); err != nil {
 		return nil, errors.New("initialize a valid invitation store before starting")
+	}
+	if g.webhook, err = newWebhookNotifier(cfg.WebhookURL, webhookTimeout); err != nil {
+		return nil, err
 	}
 	return g, nil
 }
@@ -418,8 +423,16 @@ func (g *gateway) access(w http.ResponseWriter, r *http.Request, s invitationSto
 		return
 	}
 	now := time.Now()
-	i, ok := validInvitation(s, body.Token, now)
-	if !ok {
+	i, result, err := admitInvitation(g.config.StateDir, body.Token, now)
+	if err != nil {
+		http.Error(w, "Service temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if result != admissionOK {
+		if result == admissionExhausted {
+			log.Printf("launchgate: invitation %s refused: maximum uses reached", i.ID)
+		}
+		g.notifyWebhook(webhookResultRefuse, i.ID, now, r)
 		http.Error(w, "Invalid or expired invitation", http.StatusForbidden)
 		return
 	}
@@ -440,5 +453,6 @@ func (g *gateway) access(w http.ResponseWriter, r *http.Request, s invitationSto
 			MaxAge:   max(1, int(expiry.Sub(now).Seconds())),
 		},
 	)
+	g.notifyWebhook(webhookResultAdmit, i.ID, now, r)
 	w.WriteHeader(http.StatusNoContent)
 }

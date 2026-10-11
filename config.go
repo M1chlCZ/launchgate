@@ -13,6 +13,7 @@ type config struct {
 	TrustedProxy string
 	BypassRoutes []string
 	PageDir      string
+	WebhookURL   string
 }
 
 func loadConfig() config {
@@ -24,6 +25,7 @@ func loadConfig() config {
 		TrustedProxy: strings.TrimSpace(os.Getenv("LAUNCH_TRUSTED_PROXY")),
 		BypassRoutes: splitList(os.Getenv("LAUNCH_BYPASS_ROUTES")),
 		PageDir:      strings.TrimSpace(os.Getenv("LAUNCH_PAGE_DIR")),
+		WebhookURL:   strings.TrimSpace(os.Getenv("LAUNCH_WEBHOOK_URL")),
 	}
 }
 

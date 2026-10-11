@@ -26,9 +26,11 @@ func TestLoadConfigDefaults(t *testing.T) {
 	t.Setenv("LAUNCH_TRUSTED_PROXY", "")
 	t.Setenv("LAUNCH_BYPASS_ROUTES", "")
 	t.Setenv("LAUNCH_PAGE_DIR", "")
+	t.Setenv("LAUNCH_WEBHOOK_URL", "")
 	cfg := loadConfig()
 	if cfg.Frontend != "http://frontend:3000" || cfg.Backend != "http://backend:8080" ||
-		cfg.StateDir != "/data/launch" || cfg.TrustedProxy != "" || len(cfg.BypassRoutes) != 0 || cfg.PageDir != "" {
+		cfg.StateDir != "/data/launch" || cfg.TrustedProxy != "" || len(cfg.BypassRoutes) != 0 || cfg.PageDir != "" ||
+		cfg.WebhookURL != "" {
 		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
 }
@@ -41,12 +43,13 @@ func TestLoadConfigReadsValues(t *testing.T) {
 	t.Setenv("LAUNCH_TRUSTED_PROXY", "192.0.2.1/32")
 	t.Setenv("LAUNCH_BYPASS_ROUTES", "/api/webhooks, /api/callbacks")
 	t.Setenv("LAUNCH_PAGE_DIR", "/tmp/page")
+	t.Setenv("LAUNCH_WEBHOOK_URL", "https://audit.example/events")
 	cfg := loadConfig()
 	if cfg.Origin != "https://example.test" || cfg.StateDir != "/tmp/launch" || cfg.TrustedProxy != "192.0.2.1/32" ||
 		len(
 			cfg.BypassRoutes,
 		) != 2 || cfg.BypassRoutes[0] != "/api/webhooks" || cfg.BypassRoutes[1] != "/api/callbacks" ||
-		cfg.PageDir != "/tmp/page" {
+		cfg.PageDir != "/tmp/page" || cfg.WebhookURL != "https://audit.example/events" {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 }
@@ -78,6 +81,9 @@ func TestNewGatewayValidation(t *testing.T) {
 		{"trusted proxy range", func(c *config) { c.TrustedProxy = "10.0.0.0/8" }},
 		{"trusted proxy invalid", func(c *config) { c.TrustedProxy = "not-a-cidr" }},
 		{"bypass route relative", func(c *config) { c.BypassRoutes = []string{"webhook"} }},
+		{"webhook scheme", func(c *config) { c.WebhookURL = "ftp://example.test" }},
+		{"webhook host", func(c *config) { c.WebhookURL = "https://" }},
+		{"webhook relative", func(c *config) { c.WebhookURL = "/events" }},
 	}
 	for _, tc := range cases {
 		cfg := base

@@ -20,16 +20,20 @@ const (
 	tokenBytes         = 32
 	encodedTokenLength = 43
 	maxInvitations     = 1000
+	maxInvitationUses  = 100000
 	modeClosed         = "closed"
 	modePreview        = "preview"
 	modePublic         = "public"
 )
 
 type invitation struct {
-	ID        string    `json:"id"`
-	Label     string    `json:"label"`
-	TokenHash string    `json:"token_hash"`
-	ExpiresAt time.Time `json:"expires_at"`
+	ID         string    `json:"id"`
+	Label      string    `json:"label"`
+	TokenHash  string    `json:"token_hash"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	MaxUses    int       `json:"max_uses,omitempty"`
+	Uses       int       `json:"uses,omitempty"`
+	LastUsedAt time.Time `json:"last_used_at,omitzero"`
 }
 
 type invitationStore struct {
@@ -65,7 +69,8 @@ func loadStore(dir string) (invitationStore, error) {
 	for _, i := range s.Invitations {
 		hash, decodeErr := hex.DecodeString(i.TokenHash)
 		if decodeErr != nil || len(hash) != tokenBytes || i.ID == "" || len(i.ID) > 64 || seen[i.ID] ||
-			i.ExpiresAt.IsZero() {
+			i.ExpiresAt.IsZero() || i.Uses < 0 || i.MaxUses < 0 || i.MaxUses > maxInvitationUses ||
+			(i.MaxUses > 0 && i.Uses > i.MaxUses) {
 			return s, errors.New("invalid invitation record")
 		}
 		seen[i.ID] = true
@@ -148,10 +153,17 @@ func setMode(dir, mode string) error {
 }
 
 func issueInvitation(dir, label string, ttl time.Duration, now time.Time) (invitation, string, error) {
+	return issueInvitationWithLimit(dir, label, ttl, 0, now)
+}
+
+func issueInvitationWithLimit(dir, label string, ttl time.Duration, maxUses int, now time.Time) (invitation, string, error) {
 	var i invitation
 	if strings.TrimSpace(label) == "" || len(label) > 120 || strings.ContainsAny(label, "\r\n\x00") || ttl <= 0 ||
 		ttl > 30*24*time.Hour {
 		return i, "", errors.New("label is required; expiry must be between 1 second and 720 hours")
+	}
+	if maxUses < 0 || maxUses > maxInvitationUses {
+		return i, "", errors.New("max uses must be between 0 and 100000")
 	}
 	raw := make([]byte, tokenBytes)
 	if _, err := rand.Read(raw); err != nil {
@@ -164,6 +176,7 @@ func issueInvitation(dir, label string, ttl time.Duration, now time.Time) (invit
 		Label:     label,
 		TokenHash: hex.EncodeToString(hash[:]),
 		ExpiresAt: now.Add(ttl).UTC(),
+		MaxUses:   maxUses,
 	}
 	err := withStoreLock(dir, func() error {
 		s, err := loadStore(dir)
@@ -200,4 +213,46 @@ func revokeInvitation(dir, id string) error {
 		}
 		return errors.New("invitation not found")
 	})
+}
+
+type admissionResult int
+
+const (
+	admissionInvalid admissionResult = iota
+	admissionExhausted
+	admissionOK
+)
+
+func admitInvitation(dir, token string, now time.Time) (invitation, admissionResult, error) {
+	var admitted invitation
+	result := admissionInvalid
+	err := withStoreLock(dir, func() error {
+		s, loadErr := loadStore(dir)
+		if loadErr != nil {
+			return loadErr
+		}
+		found, ok := validInvitation(s, token, now)
+		if !ok {
+			return nil
+		}
+		admitted = found
+		if found.MaxUses > 0 && found.Uses >= found.MaxUses {
+			result = admissionExhausted
+			return nil
+		}
+		for n := range s.Invitations {
+			if s.Invitations[n].ID == found.ID {
+				s.Invitations[n].Uses++
+				s.Invitations[n].LastUsedAt = now.UTC()
+				admitted = s.Invitations[n]
+				break
+			}
+		}
+		if saveErr := saveStore(dir, s); saveErr != nil {
+			return saveErr
+		}
+		result = admissionOK
+		return nil
+	})
+	return admitted, result, err
 }

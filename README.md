@@ -60,7 +60,7 @@ Run these commands from the repository root. The gate listens on port 8090.
 | `serve` | Start the gate. |
 | `init` | Create the invitation store in the closed mode. |
 | `mode closed\|preview\|public` | Set the access mode. |
-| `issue -label NAME [-ttl 168h]` | Create an invitation and print the URL. |
+| `issue -label NAME [-ttl 168h] [-max-uses N]` | Create an invitation and print the URL. |
 | `revoke INVITATION_ID` | Delete one invitation. |
 | `list` | Show the mode and all active invitations. |
 | `healthcheck` | Probe the local health endpoint. |
@@ -78,6 +78,7 @@ Only `LAUNCH_ORIGIN` is mandatory. The gate validates the origin before it start
 | `LAUNCH_TRUSTED_PROXY` | empty | One proxy address in CIDR form. Only this peer can set `X-Real-IP`. Empty means that the gate ignores the header. |
 | `LAUNCH_BYPASS_ROUTES` | empty | Exact POST paths that bypass the gate, for example a payment webhook. |
 | `LAUNCH_PAGE_DIR` | empty | A directory with your own page files. Empty uses the built-in page. |
+| `LAUNCH_WEBHOOK_URL` | empty | The audit endpoint for invitation events. It must be an `http` or `https` URL. Empty disables the webhook. The timeout is three seconds. |
 
 ## Invitations
 
@@ -86,6 +87,71 @@ Only `LAUNCH_ORIGIN` is mandatory. The gate validates the origin before it start
 3. The page sends the token to the gate. The gate sets a secure cookie.
 4. The reviewer sees the application until the invitation expires or you revoke it.
 5. The cookie lifetime is at most seven days. It is never longer than the invitation.
+6. Each successful exchange updates the invitation counters. See [Counters and use limits](#counters-and-use-limits).
+
+## Counters and use limits
+
+The gate counts every successful invitation exchange and records the last-used
+time. The counters live in the invitation store next to the invitation record.
+The invitation token does not carry them. The `list` command shows the count,
+the limit, and the last use:
+
+```sh
+LAUNCH_STATE_DIR=$PWD/state go run . list
+```
+
+```text
+Mode: preview
+4a1c8d2f...	2026-11-10T12:00:00Z	Reviewer	2/3	2026-11-03T09:15:00Z
+```
+
+An invitation can carry a use limit with `-max-uses`. When the limit is
+reached, the gate refuses the link as invalid and logs this line:
+
+```text
+launchgate: invitation 4a1c8d2f... refused: maximum uses reached
+```
+
+The gate keeps the invitation in the store for audit.
+
+```sh
+LAUNCH_STATE_DIR=$PWD/state go run . issue -label Reviewer -max-uses 3
+```
+
+One use is one successful exchange of the invitation link at `/_launch/access`.
+Requests with the resulting cookie do not consume uses. The default `0` means
+unlimited, and an invitation without a limit always admits. The limit is at
+most 100000.
+
+## Access webhook
+
+Set `LAUNCH_WEBHOOK_URL` to send a small JSON event for every invitation
+admission and refusal:
+
+```sh
+LAUNCH_WEBHOOK_URL=https://audit.example/launchgate go run . serve
+```
+
+```json
+{
+  "invitation_id": "4a1c8d2f...",
+  "result": "admit",
+  "timestamp": "2026-11-03T09:15:00Z",
+  "client_ip": "203.0.113.9",
+  "user_agent": "Mozilla/5.0 ..."
+}
+```
+
+The `result` is `admit` or `refuse`. A refusal with no identifiable invitation
+carries an empty `invitation_id`. The gate sends events in the background with
+a three-second timeout. Delivery failures are logged and never change the HTTP
+response. Events come only from the invitation exchange endpoint, not from
+browse requests. The webhook is opt-in: when `LAUNCH_WEBHOOK_URL` is empty, the
+gate sends nothing.
+
+**Privacy:** `client_ip` and `user_agent` are personal data. Configure the
+webhook only when the receiving endpoint is trusted and its retention policy is
+appropriate.
 
 ## Custom page
 
@@ -116,6 +182,8 @@ Private paths keep the header in every mode. The list is `/account`, `/admin`, `
 - All gate responses are `no-store`.
 - A corrupt or missing store fails closed. The gate denies access.
 - The gate stores invitation tokens as hashes only.
+- The access webhook is opt-in. The gate sends the client IP and the user agent
+  only to the configured endpoint, and only for invitation exchanges.
 
 ## Docker
 

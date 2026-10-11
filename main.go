@@ -83,9 +83,31 @@ func listCommand(dir string, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "Mode: %s\n", s.Mode)
 	for _, i := range s.Invitations {
-		fmt.Fprintf(out, "%s\t%s\t%s\n", i.ID, i.ExpiresAt.Format(time.RFC3339), i.Label)
+		fmt.Fprintf(
+			out,
+			"%s\t%s\t%s\t%s\t%s\n",
+			i.ID,
+			i.ExpiresAt.Format(time.RFC3339),
+			i.Label,
+			usesLabel(i),
+			lastUsedLabel(i),
+		)
 	}
 	return nil
+}
+
+func usesLabel(i invitation) string {
+	if i.MaxUses > 0 {
+		return fmt.Sprintf("%d/%d", i.Uses, i.MaxUses)
+	}
+	return fmt.Sprintf("%d", i.Uses)
+}
+
+func lastUsedLabel(i invitation) string {
+	if i.LastUsedAt.IsZero() {
+		return "-"
+	}
+	return i.LastUsedAt.Format(time.RFC3339)
 }
 
 func issueCommand(cfg config, args []string, out io.Writer) error {
@@ -93,25 +115,22 @@ func issueCommand(cfg config, args []string, out io.Writer) error {
 	flags.SetOutput(io.Discard)
 	label := flags.String("label", "", "recipient label")
 	ttl := flags.Duration("ttl", 7*24*time.Hour, "validity, at most 720h")
+	maxUses := flags.Int("max-uses", 0, "maximum admissions, 0 for unlimited")
 	if err := flags.Parse(args); err != nil {
-		return errors.New("usage: issue -label NAME [-ttl 168h]")
+		return errors.New("usage: issue -label NAME [-ttl 168h] [-max-uses N]")
 	}
 	if cfg.Origin == "" {
 		return errors.New("LAUNCH_ORIGIN is required to print an invitation link")
 	}
-	i, token, err := issueInvitation(cfg.StateDir, *label, *ttl, time.Now())
+	i, token, err := issueInvitationWithLimit(cfg.StateDir, *label, *ttl, *maxUses, time.Now())
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(
-		out,
-		"ID: %s\nExpires: %s\n%s%s#%s\n",
-		i.ID,
-		i.ExpiresAt.Format(time.RFC3339),
-		cfg.Origin,
-		entryPath,
-		token,
-	)
+	fmt.Fprintf(out, "ID: %s\nExpires: %s\n", i.ID, i.ExpiresAt.Format(time.RFC3339))
+	if i.MaxUses > 0 {
+		fmt.Fprintf(out, "Max uses: %d\n", i.MaxUses)
+	}
+	fmt.Fprintf(out, "%s%s#%s\n", cfg.Origin, entryPath, token)
 	return nil
 }
 

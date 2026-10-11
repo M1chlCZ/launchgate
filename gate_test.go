@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -330,6 +332,200 @@ func TestStoreRejectsInvalidAndConcurrentUpdates(t *testing.T) {
 	}
 	if len(saved.Invitations) != 12 {
 		t.Fatalf("lost updates: %d", len(saved.Invitations))
+	}
+}
+
+func TestUsageCountersIncrementAndPersist(t *testing.T) {
+	t.Parallel()
+	g, dir, _ := fixture(t)
+	invite, token, err := issueInvitation(dir, "counter", time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(token) != encodedTokenLength {
+		t.Fatalf("token length %d", len(token))
+	}
+	unlock(t, g, token)
+	unlock(t, g, token)
+	s, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Invitations) != 1 || s.Invitations[0].ID != invite.ID || s.Invitations[0].Uses != 2 ||
+		s.Invitations[0].LastUsedAt.IsZero() || s.Invitations[0].MaxUses != 0 {
+		t.Fatalf("counters: %+v", s.Invitations)
+	}
+	firstUse := s.Invitations[0].LastUsedAt
+	reloaded, err := newGateway(config{
+		Origin: "https://example.test", Frontend: "http://127.0.0.1:1", Backend: "http://127.0.0.1:1",
+		StateDir: dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := request(reloaded, "POST", accessPath, `{"token":"`+token+`"}`, nil); w.Code != 204 {
+		t.Fatalf("admission after reload: %d %s", w.Code, w.Body.String())
+	}
+	s, err = loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Invitations[0].Uses != 3 || s.Invitations[0].LastUsedAt.Before(firstUse) {
+		t.Fatalf("counters after reload: %+v", s.Invitations)
+	}
+}
+
+func TestListShowsUsageCounters(t *testing.T) {
+	t.Parallel()
+	g, dir, _ := fixture(t)
+	_, limited, err := issueInvitationWithLimit(dir, "limited", time.Hour, 5, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock(t, g, limited)
+	s, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := s.Invitations[0].LastUsedAt.Format(time.RFC3339)
+	var out bytes.Buffer
+	if err := listCommand(dir, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "limited\t1/5\t"+stamp) {
+		t.Fatalf("list output: %q", out.String())
+	}
+	if _, _, err := issueInvitation(dir, "unlimited", time.Hour, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := listCommand(dir, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "unlimited\t0\t-") {
+		t.Fatalf("list output: %q", out.String())
+	}
+}
+
+func TestMaxUsesExhaustionRefusesAndKeepsInvitation(t *testing.T) {
+	g, dir, _ := fixture(t)
+	invite, token, err := issueInvitationWithLimit(dir, "limited", time.Hour, 2, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+	first := request(g, "POST", accessPath, `{"token":"`+token+`"}`, nil)
+	if first.Code != 204 {
+		t.Fatalf("first admission: %d", first.Code)
+	}
+	cookies := first.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("cookies: %v", cookies)
+	}
+	if second := request(g, "POST", accessPath, `{"token":"`+token+`"}`, nil); second.Code != 204 {
+		t.Fatalf("second admission: %d", second.Code)
+	}
+	refused := request(g, "POST", accessPath, `{"token":"`+token+`"}`, nil)
+	if refused.Code != 403 || !strings.Contains(refused.Body.String(), "Invalid or expired invitation") {
+		t.Fatalf("exhausted: %d %q", refused.Code, refused.Body.String())
+	}
+	if !strings.Contains(logs.String(), "maximum uses reached") || !strings.Contains(logs.String(), invite.ID) {
+		t.Fatalf("log: %q", logs.String())
+	}
+	s, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Invitations) != 1 || s.Invitations[0].ID != invite.ID || s.Invitations[0].Uses != 2 {
+		t.Fatalf("invitation state: %+v", s.Invitations)
+	}
+	if w := request(g, "GET", "/api/v1/catalog", "", cookies[0]); w.Code != 200 {
+		t.Fatalf("cookie after exhaustion: %d", w.Code)
+	}
+}
+
+func TestInvitationWithoutLimitAdmitsRepeatedly(t *testing.T) {
+	t.Parallel()
+	g, dir, _ := fixture(t)
+	_, token, err := issueInvitation(dir, "plain", time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 4 {
+		if w := request(g, "POST", accessPath, `{"token":"`+token+`"}`, nil); w.Code != 204 {
+			t.Fatalf("admission: %d %s", w.Code, w.Body.String())
+		}
+	}
+	s, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Invitations[0].Uses != 4 || s.Invitations[0].MaxUses != 0 || s.Invitations[0].LastUsedAt.IsZero() {
+		t.Fatalf("counters: %+v", s.Invitations)
+	}
+}
+
+func TestStoreRejectsInvalidCounters(t *testing.T) {
+	t.Parallel()
+	hash := strings.Repeat("ab", tokenBytes)
+	expiry := "2030-01-01T00:00:00Z"
+	cases := []string{
+		`{"mode":"preview","invitations":[{"id":"a","label":"l","token_hash":"` + hash + `","expires_at":"` + expiry + `","uses":-1}]}`,
+		`{"mode":"preview","invitations":[{"id":"a","label":"l","token_hash":"` + hash + `","expires_at":"` + expiry + `","max_uses":-1}]}`,
+		`{"mode":"preview","invitations":[{"id":"a","label":"l","token_hash":"` + hash + `","expires_at":"` + expiry + `","max_uses":100001}]}`,
+		`{"mode":"preview","invitations":[{"id":"a","label":"l","token_hash":"` + hash + `","expires_at":"` + expiry + `","uses":3,"max_uses":2}]}`,
+	}
+	for _, content := range cases {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "invitations.json"), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadStore(dir); err == nil {
+			t.Errorf("invalid counters accepted: %s", content)
+		}
+	}
+	dir := t.TempDir()
+	legacy := `{"mode":"preview","invitations":[{"id":"a","label":"l","token_hash":"` + hash +
+		`","expires_at":"` + expiry + `"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "invitations.json"), []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Invitations[0].Uses != 0 || s.Invitations[0].MaxUses != 0 || !s.Invitations[0].LastUsedAt.IsZero() {
+		t.Fatalf("legacy record: %+v", s.Invitations[0])
+	}
+}
+
+func TestIssueCommandMaxUsesFlag(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := initializeStore(dir); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{Origin: "https://example.test", StateDir: dir}
+	var out bytes.Buffer
+	if err := issueCommand(cfg, []string{"-label", "limited", "-max-uses", "3"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Max uses: 3") {
+		t.Fatalf("issue output: %q", out.String())
+	}
+	s, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Invitations) != 1 || s.Invitations[0].MaxUses != 3 {
+		t.Fatalf("issued invitations: %+v", s.Invitations)
+	}
+	for _, value := range []string{"-1", "100001"} {
+		if err := issueCommand(cfg, []string{"-label", "bad", "-max-uses", value}, &out); err == nil {
+			t.Fatalf("max uses %s accepted", value)
+		}
 	}
 }
 
