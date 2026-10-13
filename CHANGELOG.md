@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Reviewer TOTP second factor. `issue -totp` stores a per-invitation secret
+  and prints an `otpauth://` URI. The maintenance page asks for the current
+  code; each code admits once with one period of allowed clock drift, and the
+  `list` command shows which invitations require a code.
+- Failure limits on the invitation exchange: 20 failures per client IP and 5
+  per TOTP invitation in fifteen minutes. Locked keys receive `429` with a
+  `Retry-After` header.
+
 ## [0.2.0] - 2026-11-03
 
 ### Added

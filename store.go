@@ -34,6 +34,8 @@ type invitation struct {
 	MaxUses    int       `json:"max_uses,omitempty"`
 	Uses       int       `json:"uses,omitempty"`
 	LastUsedAt time.Time `json:"last_used_at,omitzero"`
+	TOTPSecret string    `json:"totp_secret,omitempty"`
+	TOTPStep   int64     `json:"totp_step,omitempty"`
 }
 
 type invitationStore struct {
@@ -70,7 +72,7 @@ func loadStore(dir string) (invitationStore, error) {
 		hash, decodeErr := hex.DecodeString(i.TokenHash)
 		if decodeErr != nil || len(hash) != tokenBytes || i.ID == "" || len(i.ID) > 64 || seen[i.ID] ||
 			i.ExpiresAt.IsZero() || i.Uses < 0 || i.MaxUses < 0 || i.MaxUses > maxInvitationUses ||
-			(i.MaxUses > 0 && i.Uses > i.MaxUses) {
+			(i.MaxUses > 0 && i.Uses > i.MaxUses) || i.TOTPStep < 0 || !validTOTPSecret(i.TOTPSecret) {
 			return s, errors.New("invalid invitation record")
 		}
 		seen[i.ID] = true
@@ -157,13 +159,31 @@ func issueInvitation(dir, label string, ttl time.Duration, now time.Time) (invit
 }
 
 func issueInvitationWithLimit(dir, label string, ttl time.Duration, maxUses int, now time.Time) (invitation, string, error) {
+	return issueInvitationWithOptions(dir, issueOptions{Label: label, TTL: ttl, MaxUses: maxUses}, now)
+}
+
+type issueOptions struct {
+	Label   string
+	TTL     time.Duration
+	MaxUses int
+	TOTP    bool
+}
+
+func issueInvitationWithOptions(dir string, options issueOptions, now time.Time) (invitation, string, error) {
 	var i invitation
-	if strings.TrimSpace(label) == "" || len(label) > 120 || strings.ContainsAny(label, "\r\n\x00") || ttl <= 0 ||
-		ttl > 30*24*time.Hour {
+	if strings.TrimSpace(options.Label) == "" || len(options.Label) > 120 ||
+		strings.ContainsAny(options.Label, "\r\n\x00") || options.TTL <= 0 || options.TTL > 30*24*time.Hour {
 		return i, "", errors.New("label is required; expiry must be between 1 second and 720 hours")
 	}
-	if maxUses < 0 || maxUses > maxInvitationUses {
+	if options.MaxUses < 0 || options.MaxUses > maxInvitationUses {
 		return i, "", errors.New("max uses must be between 0 and 100000")
+	}
+	secret := ""
+	if options.TOTP {
+		var err error
+		if secret, err = newTOTPSecret(); err != nil {
+			return i, "", err
+		}
 	}
 	raw := make([]byte, tokenBytes)
 	if _, err := rand.Read(raw); err != nil {
@@ -172,11 +192,12 @@ func issueInvitationWithLimit(dir, label string, ttl time.Duration, maxUses int,
 	token := base64.RawURLEncoding.EncodeToString(raw)
 	hash := sha256.Sum256([]byte(token))
 	i = invitation{
-		ID:        hex.EncodeToString(hash[:8]),
-		Label:     label,
-		TokenHash: hex.EncodeToString(hash[:]),
-		ExpiresAt: now.Add(ttl).UTC(),
-		MaxUses:   maxUses,
+		ID:         hex.EncodeToString(hash[:8]),
+		Label:      options.Label,
+		TokenHash:  hex.EncodeToString(hash[:]),
+		ExpiresAt:  now.Add(options.TTL).UTC(),
+		MaxUses:    options.MaxUses,
+		TOTPSecret: secret,
 	}
 	err := withStoreLock(dir, func() error {
 		s, err := loadStore(dir)
@@ -220,10 +241,15 @@ type admissionResult int
 const (
 	admissionInvalid admissionResult = iota
 	admissionExhausted
+	admissionCodeMissing
+	admissionCodeRejected
+	admissionLocked
 	admissionOK
 )
 
-func admitInvitation(dir, token string, now time.Time) (invitation, admissionResult, error) {
+type invitationLock func(id string) (time.Duration, bool)
+
+func admitInvitation(dir, token, code string, now time.Time, locked invitationLock) (invitation, admissionResult, error) {
 	var admitted invitation
 	result := admissionInvalid
 	err := withStoreLock(dir, func() error {
@@ -239,6 +265,29 @@ func admitInvitation(dir, token string, now time.Time) (invitation, admissionRes
 		if found.MaxUses > 0 && found.Uses >= found.MaxUses {
 			result = admissionExhausted
 			return nil
+		}
+		if found.TOTPSecret != "" {
+			if code == "" {
+				result = admissionCodeMissing
+				return nil
+			}
+			if locked != nil {
+				if _, blocked := locked(found.ID); blocked {
+					result = admissionLocked
+					return nil
+				}
+			}
+			step, matches := matchTOTPStep(found.TOTPSecret, code, now, found.TOTPStep)
+			if !matches {
+				result = admissionCodeRejected
+				return nil
+			}
+			for n := range s.Invitations {
+				if s.Invitations[n].ID == found.ID {
+					s.Invitations[n].TOTPStep = step
+					break
+				}
+			}
 		}
 		for n := range s.Invitations {
 			if s.Invitations[n].ID == found.ID {

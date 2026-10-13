@@ -62,3 +62,27 @@ button:hover {
 a {
   color: inherit;
 }
+#code-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  margin: 16px 0 0;
+}
+#code-form[hidden] {
+  display: none;
+}
+#code-form label {
+  flex-basis: 100%;
+  font-size: 14px;
+}
+#code-input {
+  border: 1px solid #1f2933;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: inherit;
+  letter-spacing: 2px;
+  text-align: center;
+  width: 9ch;
+}

@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -40,13 +41,16 @@ const (
 )
 
 type gateway struct {
-	config            config
-	host              string
-	trusted           netip.Prefix
-	trustedSet        bool
-	frontend, backend *httputil.ReverseProxy
-	page              *pageRenderer
-	webhook           *webhookNotifier
+	config             config
+	host               string
+	trusted            netip.Prefix
+	trustedSet         bool
+	frontend, backend  *httputil.ReverseProxy
+	page               *pageRenderer
+	webhook            *webhookNotifier
+	clock              func() time.Time
+	clientFailures     *failureLimiter
+	invitationFailures *failureLimiter
 }
 
 func newGateway(cfg config) (http.Handler, error) {
@@ -69,7 +73,7 @@ func newGateway(cfg config) (http.Handler, error) {
 			return nil, errors.New("LAUNCH_BYPASS_ROUTES entries must start with /")
 		}
 	}
-	g := &gateway{config: cfg, host: origin.Host, trusted: trusted, trustedSet: trustedSet}
+	g := &gateway{config: cfg, host: origin.Host, trusted: trusted, trustedSet: trustedSet, clock: time.Now}
 	if g.frontend, err = g.proxy(cfg.Frontend); err != nil {
 		return nil, err
 	}
@@ -85,6 +89,8 @@ func newGateway(cfg config) (http.Handler, error) {
 	if g.webhook, err = newWebhookNotifier(cfg.WebhookURL, webhookTimeout); err != nil {
 		return nil, err
 	}
+	g.clientFailures = newFailureLimiter(maxFailuresPerIP, failureWindow, limiterCapacity, g.clock)
+	g.invitationFailures = newFailureLimiter(maxFailuresPerInvitation, failureWindow, limiterCapacity, g.clock)
 	return g, nil
 }
 
@@ -384,7 +390,7 @@ func (g *gateway) allowed(s invitationStore, r *http.Request) bool {
 	}
 	if s.Mode == modePreview {
 		if c, cookieErr := r.Cookie(previewCookie); cookieErr == nil {
-			_, valid := validInvitation(s, c.Value, time.Now())
+			_, valid := validInvitation(s, c.Value, g.clock())
 			return valid
 		}
 	}
@@ -410,6 +416,7 @@ func (g *gateway) access(w http.ResponseWriter, r *http.Request, s invitationSto
 	}
 	var body struct {
 		Token string `json:"token"`
+		Code  string `json:"code"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAccessBodyBytes))
 	decoder.DisallowUnknownFields()
@@ -422,37 +429,80 @@ func (g *gateway) access(w http.ResponseWriter, r *http.Request, s invitationSto
 		http.Error(w, "Invalid invitation", http.StatusForbidden)
 		return
 	}
-	now := time.Now()
-	i, result, err := admitInvitation(g.config.StateDir, body.Token, now)
+	now := g.clock()
+	ip := g.clientIP(r)
+	if retryAfter, blocked := g.clientFailures.locked(ip); blocked {
+		g.rateLimited(w, retryAfter)
+		return
+	}
+	i, result, err := admitInvitation(g.config.StateDir, body.Token, body.Code, now, g.invitationLocked)
 	if err != nil {
 		http.Error(w, "Service temporarily unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if result != admissionOK {
+	switch result {
+	case admissionOK:
+		g.invitationFailures.clear(i.ID)
+		expiry := i.ExpiresAt
+		if limit := now.Add(7 * 24 * time.Hour); expiry.After(limit) {
+			expiry = limit
+		}
+		http.SetCookie(
+			w,
+			&http.Cookie{
+				Name:     previewCookie,
+				Value:    body.Token,
+				Path:     "/",
+				Secure:   true,
+				HttpOnly: true,
+				SameSite: http.SameSiteLaxMode,
+				Expires:  expiry,
+				MaxAge:   max(1, int(expiry.Sub(now).Seconds())),
+			},
+		)
+		g.notifyWebhook(webhookResultAdmit, i.ID, now, r)
+		w.WriteHeader(http.StatusNoContent)
+	case admissionCodeMissing:
+		http.Error(w, "Verification code required", http.StatusUnauthorized)
+	case admissionLocked:
+		retryAfter, _ := g.invitationFailures.locked(i.ID)
+		g.rateLimited(w, retryAfter)
+	case admissionCodeRejected:
+		g.clientFailures.fail(ip)
+		g.invitationFailures.fail(i.ID)
+		g.notifyWebhook(webhookResultRefuse, i.ID, now, r)
+		if retryAfter, blocked := g.invitationFailures.locked(i.ID); blocked {
+			g.rateLimited(w, retryAfter)
+			return
+		}
+		if retryAfter, blocked := g.clientFailures.locked(ip); blocked {
+			g.rateLimited(w, retryAfter)
+			return
+		}
+		http.Error(w, "Invalid verification code", http.StatusUnauthorized)
+	default:
 		if result == admissionExhausted {
 			log.Printf("launchgate: invitation %s refused: maximum uses reached", i.ID)
 		}
+		g.clientFailures.fail(ip)
 		g.notifyWebhook(webhookResultRefuse, i.ID, now, r)
+		if retryAfter, blocked := g.clientFailures.locked(ip); blocked {
+			g.rateLimited(w, retryAfter)
+			return
+		}
 		http.Error(w, "Invalid or expired invitation", http.StatusForbidden)
-		return
 	}
-	expiry := i.ExpiresAt
-	if limit := now.Add(7 * 24 * time.Hour); expiry.After(limit) {
-		expiry = limit
+}
+
+func (g *gateway) invitationLocked(id string) (time.Duration, bool) {
+	return g.invitationFailures.locked(id)
+}
+
+func (g *gateway) rateLimited(w http.ResponseWriter, retryAfter time.Duration) {
+	seconds := int(retryAfter.Seconds())
+	if seconds < 1 {
+		seconds = 1
 	}
-	http.SetCookie(
-		w,
-		&http.Cookie{
-			Name:     previewCookie,
-			Value:    body.Token,
-			Path:     "/",
-			Secure:   true,
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-			Expires:  expiry,
-			MaxAge:   max(1, int(expiry.Sub(now).Seconds())),
-		},
-	)
-	g.notifyWebhook(webhookResultAdmit, i.ID, now, r)
-	w.WriteHeader(http.StatusNoContent)
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	http.Error(w, "Too many attempts", http.StatusTooManyRequests)
 }

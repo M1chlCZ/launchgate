@@ -85,15 +85,23 @@ func listCommand(dir string, out io.Writer) error {
 	for _, i := range s.Invitations {
 		fmt.Fprintf(
 			out,
-			"%s\t%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\n",
 			i.ID,
 			i.ExpiresAt.Format(time.RFC3339),
 			i.Label,
 			usesLabel(i),
 			lastUsedLabel(i),
+			totpLabel(i),
 		)
 	}
 	return nil
+}
+
+func totpLabel(i invitation) string {
+	if i.TOTPSecret != "" {
+		return "totp"
+	}
+	return "-"
 }
 
 func usesLabel(i invitation) string {
@@ -116,19 +124,27 @@ func issueCommand(cfg config, args []string, out io.Writer) error {
 	label := flags.String("label", "", "recipient label")
 	ttl := flags.Duration("ttl", 7*24*time.Hour, "validity, at most 720h")
 	maxUses := flags.Int("max-uses", 0, "maximum admissions, 0 for unlimited")
+	totp := flags.Bool("totp", false, "require a TOTP verification code")
 	if err := flags.Parse(args); err != nil {
-		return errors.New("usage: issue -label NAME [-ttl 168h] [-max-uses N]")
+		return errors.New("usage: issue -label NAME [-ttl 168h] [-max-uses N] [-totp]")
 	}
 	if cfg.Origin == "" {
 		return errors.New("LAUNCH_ORIGIN is required to print an invitation link")
 	}
-	i, token, err := issueInvitationWithLimit(cfg.StateDir, *label, *ttl, *maxUses, time.Now())
+	i, token, err := issueInvitationWithOptions(
+		cfg.StateDir,
+		issueOptions{Label: *label, TTL: *ttl, MaxUses: *maxUses, TOTP: *totp},
+		time.Now(),
+	)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "ID: %s\nExpires: %s\n", i.ID, i.ExpiresAt.Format(time.RFC3339))
 	if i.MaxUses > 0 {
 		fmt.Fprintf(out, "Max uses: %d\n", i.MaxUses)
+	}
+	if i.TOTPSecret != "" {
+		fmt.Fprintf(out, "TOTP: %s\n", totpURI(i.Label, i.TOTPSecret))
 	}
 	fmt.Fprintf(out, "%s%s#%s\n", cfg.Origin, entryPath, token)
 	return nil

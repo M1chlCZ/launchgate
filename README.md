@@ -60,7 +60,7 @@ Run these commands from the repository root. The gate listens on port 8090.
 | `serve` | Start the gate. |
 | `init` | Create the invitation store in the closed mode. |
 | `mode closed\|preview\|public` | Set the access mode. |
-| `issue -label NAME [-ttl 168h] [-max-uses N]` | Create an invitation and print the URL. |
+| `issue -label NAME [-ttl 168h] [-max-uses N] [-totp]` | Create an invitation and print the URL. |
 | `revoke INVITATION_ID` | Delete one invitation. |
 | `list` | Show the mode and all active invitations. |
 | `healthcheck` | Probe the local health endpoint. |
@@ -84,7 +84,7 @@ Only `LAUNCH_ORIGIN` is mandatory. The gate validates the origin before it start
 
 1. The gate creates a 32-byte token. It stores the SHA-256 hash and discards the token.
 2. The reviewer opens the invitation URL. The page reads the token from the URL fragment.
-3. The page sends the token to the gate. The gate sets a secure cookie.
+3. The page sends the token to the gate. When the invitation requires a TOTP code, the page asks for it first. The gate sets a secure cookie.
 4. The reviewer sees the application until the invitation expires or you revoke it.
 5. The cookie lifetime is at most seven days. It is never longer than the invitation.
 6. Each successful exchange updates the invitation counters. See [Counters and use limits](#counters-and-use-limits).
@@ -102,8 +102,11 @@ LAUNCH_STATE_DIR=$PWD/state go run . list
 
 ```text
 Mode: preview
-4a1c8d2f...	2026-11-10T12:00:00Z	Reviewer	2/3	2026-11-03T09:15:00Z
+4a1c8d2f...	2026-11-10T12:00:00Z	Reviewer	2/3	2026-11-03T09:15:00Z	-
 ```
+
+The last column is `totp` when the invitation requires a verification code,
+and `-` otherwise.
 
 An invitation can carry a use limit with `-max-uses`. When the limit is
 reached, the gate refuses the link as invalid and logs this line:
@@ -122,6 +125,26 @@ One use is one successful exchange of the invitation link at `/_launch/access`.
 Requests with the resulting cookie do not consume uses. The default `0` means
 unlimited, and an invitation without a limit always admits. The limit is at
 most 100000.
+
+## TOTP verification
+
+An invitation can require a time-based verification code. Create it with
+`-totp`:
+
+```sh
+LAUNCH_STATE_DIR=$PWD/state go run . issue -label Reviewer -totp
+```
+
+The command prints the invitation URL and an `otpauth://` URI. Add the URI to
+an authenticator app. The reviewer opens the invitation URL; the page then
+asks for the current six-digit code. The code uses SHA-1, six digits and a
+30-second period, with one period of allowed clock drift.
+
+Each code admits once. A replayed or incorrect code is refused. Five incorrect
+codes in fifteen minutes lock the invitation until the window passes.
+
+The TOTP secret lives in the invitation store next to the token hash. The
+store file is owner-only, like the token hashes.
 
 ## Access webhook
 
@@ -182,6 +205,9 @@ Private paths keep the header in every mode. The list is `/account`, `/admin`, `
 - All gate responses are `no-store`.
 - A corrupt or missing store fails closed. The gate denies access.
 - The gate stores invitation tokens as hashes only.
+- The gate limits failed invitation exchanges to 20 per client IP and 5 per
+  TOTP invitation in fifteen minutes. A locked key receives `429` with a
+  `Retry-After` header. The limits live in memory and reset on restart.
 - The access webhook is opt-in. The gate sends the client IP and the user agent
   only to the configured endpoint, and only for invitation exchanges.
 
